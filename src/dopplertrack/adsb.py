@@ -6,6 +6,7 @@ import gzip
 import io
 import json
 import os
+import zlib
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from .geo import lla_to_enu
 
 FT = 0.3048
 KT = 0.514444
+TRACE_PARSE_ERRORS = (OSError, ValueError, IndexError, TypeError, zlib.error, EOFError)
 _DOC8643_URL = "https://opensky-network.org/datasets/metadata/doc8643AircraftTypes.csv"
 
 
@@ -97,6 +99,8 @@ def parse_trace_bytes(raw: bytes, fallback_icao: str = "") -> Trace | None:
     if raw[:2] == b"\x1f\x8b":
         raw = gzip.decompress(raw)
     d = json.loads(raw)
+    if not isinstance(d, dict):
+        return None
     base = float(d.get("timestamp", 0.0))
     rows = d.get("trace") or []
     t, lat, lon, alt, gs, grd = [], [], [], [], [], []
@@ -126,7 +130,7 @@ def _scan_one(args):
     path, bbox = args
     try:
         tr = parse_trace_file(path)
-    except Exception:
+    except TRACE_PARSE_ERRORS:
         return None
     if tr is None:
         return None

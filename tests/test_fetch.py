@@ -23,6 +23,33 @@ def test_iter_tar_traces_filters_by_bbox():
     assert list(fetch.iter_tar_traces(io.BytesIO(data), (0.0, 1.0, 0.0, 1.0))) == []
 
 
+def test_iter_tar_traces_skips_corrupt_members():
+    import gzip
+    bad_deflate = bytearray(gzip.compress(b"x" * 500)); bad_deflate[10] ^= 0xFF
+    # one input per member of adsb.TRACE_PARSE_ERRORS: json/unicode decode errors
+    # (ValueError), BadGzipFile (OSError), invalid and truncated deflate
+    # (zlib.error, EOFError), structurally wrong documents (IndexError, TypeError);
+    # a non-object document is dropped by parse_trace_bytes itself
+    corrupt = {
+        "empty": b"",
+        "not-json": b"{not json",
+        "not-utf8": b"\xff\xfe not utf8",
+        "gzip-unknown-method": b"\x1f\x8b\x09" + b"\x00" * 8,
+        "gzip-corrupt-deflate": bytes(bad_deflate),
+        "gzip-truncated": gzip.compress(b"x" * 500)[:-4],
+        "rows-not-a-list": b'{"trace": {"a": 1}}',
+        "row-too-short": b'{"trace": [[0, 40.1, -74.1]]}',
+        "timestamp-not-a-number": b'{"timestamp": {}, "trace": []}',
+        "top-level-not-an-object": b"[1, 2, 3]",
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for name, raw in corrupt.items():
+            ti = tarfile.TarInfo(f"traces/8b/trace_full_{name}.json")
+            ti.size = len(raw); tf.addfile(ti, io.BytesIO(raw))
+    assert list(fetch.iter_tar_traces(io.BytesIO(buf.getvalue()), (40.0, 41.5, -75.0, -72.0))) == []
+
+
 def test_chained_stream_resumes_with_range(monkeypatch):
     data = _tar_bytes()
     parts = [data[: len(data) // 2], data[len(data) // 2:]]

@@ -10,7 +10,7 @@ from typing import Callable, Iterable, Iterator
 
 import requests
 
-from .adsb import Trace, in_bbox, parse_trace_bytes
+from .adsb import TRACE_PARSE_ERRORS, Trace, in_bbox, parse_trace_bytes
 
 TRACE_RE = re.compile(r"trace_full_([0-9a-f~]+)\.json$")
 API = "https://api.github.com/repos/adsblol/globe_history_{year}/releases/tags/{tag}"
@@ -71,6 +71,14 @@ class _ChainedHTTP(io.RawIOBase):
         return n
 
 
+def _parse_quiet(raw: bytes, icao: str) -> Trace | None:
+    """parse_trace_bytes that treats corrupt/unreadable documents as missing (None)."""
+    try:
+        return parse_trace_bytes(raw, icao)
+    except TRACE_PARSE_ERRORS:
+        return None
+
+
 def iter_tar_traces(fileobj, bbox, progress: Callable[[int, int], None] | None = None) -> Iterator[Trace]:
     """Yield traces touching bbox from a tar stream (readsb day archive layout traces/xx/trace_full_*.json)."""
     n_seen = 0
@@ -83,10 +91,7 @@ def iter_tar_traces(fileobj, bbox, progress: Callable[[int, int], None] | None =
                 continue
             n_seen += 1
             raw = tf.extractfile(m).read()
-            try:
-                tr = parse_trace_bytes(raw, mm.group(1))
-            except Exception:
-                continue
+            tr = _parse_quiet(raw, mm.group(1))
             if tr is not None and in_bbox(tr, bbox):
                 yield tr
             if progress and n_seen % 2000 == 0:
