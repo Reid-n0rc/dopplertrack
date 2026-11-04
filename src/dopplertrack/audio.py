@@ -72,7 +72,7 @@ def compute_spectrogram(x: np.ndarray, sr: int, nperseg: int = 8192, hop_s: floa
     `whiten_window_s` (or the global median if None). This flattens mains
     hum and stationary machinery so only *changing* tones stand out.
     """
-    hop = max(1, int(round(hop_s * sr)))
+    hop = max(1, round(hop_s * sr))
     # frames k = 0 .. K-1 cover samples [k*hop, k*hop + nperseg); computed in chunks so a
     # many-hour recording never holds its full complex STFT in memory
     K = (len(x) - nperseg) // hop + 1

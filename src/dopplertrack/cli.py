@@ -149,7 +149,7 @@ def main(argv=None):
         try:
             t_unix = float(a.utc)
         except ValueError:
-            t_unix = datetime.fromisoformat(a.utc.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+            t_unix = datetime.fromisoformat(a.utc).astimezone(timezone.utc).timestamp()
         elev = None if a.no_dem else Terrain().elevation
         grid = Grid.make(*a.bbox, a.spacing, elev)
         res, segs = pipeline.run_single_search(sp, ev, traces, grid, t_unix, tol_s=a.tol, harmonics=a.harmonics)
