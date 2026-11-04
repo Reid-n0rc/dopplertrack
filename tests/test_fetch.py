@@ -54,3 +54,17 @@ def test_chained_stream_resumes_with_range(monkeypatch):
     assert any(start > 0 for _, start in calls)          # a resume actually happened
     got = list(fetch.iter_tar_traces(io.BytesIO(out), (40.0, 41.5, -75.0, -72.0)))
     assert len(got) == 2
+
+
+def test_release_asset_urls_orders_split_tar_by_name(monkeypatch):
+    assets = [{"name": n, "browser_download_url": f"http://x/{n}"}
+              for n in ["day.tar.ab", "day.tar.aa", "notes.txt"]]
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"assets": assets}
+
+    monkeypatch.setattr(fetch.requests, "get", lambda url, timeout=0: Resp())
+    assert fetch.release_asset_urls("2026-09-08") == ["http://x/day.tar.aa", "http://x/day.tar.ab"]
