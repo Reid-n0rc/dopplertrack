@@ -27,6 +27,8 @@ def main(argv=None):
     f.add_argument("spec"); f.add_argument("--window", nargs=2, type=float, required=True, metavar=("T0", "T1"))
     f.add_argument("--band", nargs=2, type=float, required=True, metavar=("FLO", "FHI"))
     f.add_argument("--harmonics", type=int, default=1); f.add_argument("--out")
+    f.add_argument("--objective", choices=("brightness", "contrast"), default="brightness",
+                   help="brightness: mean brightness under the curve (the docs/results fits); contrast: the sweep-weighted ridge contrast detect uses")
 
     d = sub.add_parser("detect", help="scan a whole spectrogram for Doppler events and rank them")
     d.add_argument("spec"); d.add_argument("--band", nargs=2, type=float, required=True, metavar=("FLO", "FHI"))
@@ -79,7 +81,8 @@ def main(argv=None):
         print(f"wrote {a.out}: {sp.S.shape[0]} bins x {sp.S.shape[1]} frames")
     elif a.cmd == "fit":
         sp = Spectrogram.load(a.spec)
-        ef = pipeline.fit_event(sp, a.window[0], a.window[1], a.band[0], a.band[1], harmonics=a.harmonics)
+        ef = pipeline.fit_event(sp, a.window[0], a.window[1], a.band[0], a.band[1], harmonics=a.harmonics,
+                                objective=a.objective)
         js = json.dumps(ef.to_dict(), indent=1)
         print(js)
         if a.out:

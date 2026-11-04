@@ -47,6 +47,8 @@ def test_true_observer_ranks_first():
     ev1 = tracks.fit_event(sp, 230, 400, 90, 170, c=c)
     ev2 = tracks.fit_event(sp, 1150, 1310, 100, 180, c=c)
     assert abs(ev1.v - 110) < 25 and abs(ev2.v - 95) < 25
+    evb = tracks.fit_event(sp, 1150, 1310, 100, 180, c=c, objective="brightness")    # what `fit` uses
+    assert abs(evb.v - 95) < 25 and abs(evb.t_cpa - ev2.t_cpa) < 6
     dt_meas = ev2.t_cpa - ev1.t_cpa
     assert abs(dt_meas - (1220 - 300 + 3000 / c - 2500 / c)) < 6   # heard-CPA offset
 

@@ -33,6 +33,10 @@ See Results below.
    whole recording, grid-search an ideal straight-pass Doppler curve
    (f0, speed, CPA slant distance, CPA time) in each, keep the local maxima,
    refine them and rank them. `fit` does the same for one window you choose.
+   `detect` scores a sweep-weighted ridge contrast, which ignores bursts and
+   steady tones but gives the flat ends of a curve little weight; `fit` scores
+   the plain mean brightness under the curve, as the results below were fitted
+   (`--objective contrast` switches it to the detector's score).
    The curve parameters only seed a search with coarse ranges.
 3. `fetch-day` — stream one day's [adsb.lol](https://github.com/adsblol/globe_history_2026)
    archive straight from GitHub (4 GB, nothing written to disk) and keep the
@@ -63,9 +67,9 @@ uv run dopplertrack fit rec.npz --window 2090 2200 --band 95 200 --harmonics 2 -
 uv run dopplertrack fit rec.npz --window 3020 3130 --band 95 195 --out ev2.json
 uv run dopplertrack fetch-day 2026-09-08 traces_ny.npz --bbox 40.4 41.3 -74.4 -72.6
 uv run dopplertrack search rec.npz --events ev1.json ev2.json --traces traces_ny.npz \
-    --bbox 40.4 41.3 -74.4 -72.6 --spacing 200 --out results.csv
+    --bbox 40.4 41.3 -74.4 -72.6 --spacing 200 --harmonics 2 1 --out results.csv
 uv run dopplertrack refine rec.npz results.csv --events ev1.json ev2.json --traces traces_ny.npz \
-    --bbox 40.4 41.3 -74.4 -72.6 --extra ev3.json ev4.json --out fine.csv
+    --bbox 40.4 41.3 -74.4 -72.6 --harmonics 2 1 --extra ev3.json ev4.json --out fine.csv
 ```
 
 `search --point LAT LON` scores a single known location instead of a grid,
@@ -117,8 +121,12 @@ pair) and `docs/results/oyster_bay_refined_50m.csv`.
 **Automatic event detection.** The two windows above were chosen by eye, as
 in the video. Running `detect` over the whole hour with no hints returns the
 same two flyovers as its top two candidates (CPA 2155.6 s and 3068.4 s,
-scores 15.7 and 10.0; the third candidate scores 9.0), so on this recording
-the pipeline needs no manual input beyond the date and the region.
+scores 15.7 and 10.0; the third candidate scores 9.0). Its own fits of them
+can't stand in for `fit` yet: its event 2 comes out with f0 11 % above what
+the King Air's trajectory needs and the time between the two events 10 s
+short, so the search's ±6 s and ±5 % filters reject the true pair at the true
+location. Finding the flyovers needs no manual input; measuring them for the
+search still uses the two `fit` windows.
 
 ### Second recording: a 12-hour eagle cam
 

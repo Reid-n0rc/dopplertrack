@@ -91,19 +91,24 @@ def _shape(v, d, c, span=400.0, n=161):
 
 def grid_search(sp: Spectrogram, t_start, t_end, f_lo, f_hi, c, harmonics=1,
                 v_grid=None, d_grid=None, f0_step=1.0, t0_step=1.0, n_curve=120,
-                t0_range=None, f0_range=None, per_t0=False, fat_bins=5):
+                t0_range=None, f0_range=None, per_t0=False, fat_bins=5, objective="contrast"):
     """Coarse maximisation of brightness under ideal curves. Returns (score, (f0, v, d, t0_emit)).
 
-    The spectrogram is max-filtered over `fat_bins` frequency bins first so that a grid
-    curve a hertz or two off a narrow ridge still scores; the Nelder-Mead stage in
-    fit_event refines on the unfiltered spectrogram.
+    objective="contrast" scores the sweep-weighted ridge contrast (sweep_weights,
+    curve_contrast) on a spectrogram max-filtered over `fat_bins` frequency bins, so that a
+    grid curve a hertz or two off a narrow ridge still scores; the Nelder-Mead stage in
+    fit_event refines on the unfiltered spectrogram. objective="brightness" scores the plain
+    mean brightness under the curve, unweighted and unfiltered.
 
     The curve is scored on [t_start, t_end]; t0_range / f0_range (optional) restrict the
     searched emission-CPA times and fundamentals, which otherwise span the window / band.
     per_t0=True returns instead (t0s, best_score[T0], best_params[T0, 3]) so a caller can
     pick several local maxima in time."""
     from scipy.ndimage import maximum_filter1d
-    if fat_bins and fat_bins > 1:
+    if objective not in ("contrast", "brightness"):
+        raise ValueError(f"unknown objective {objective!r}")
+    contrast = objective == "contrast"
+    if contrast and fat_bins and fat_bins > 1:
         sp = Spectrogram(sp.t, sp.f, maximum_filter1d(sp.S, fat_bins, axis=0))
     v_grid = np.arange(30, 170, 10.0) if v_grid is None else v_grid
     d_grid = np.geomspace(300, 9000, 14) if d_grid is None else d_grid
@@ -116,15 +121,18 @@ def grid_search(sp: Spectrogram, t_start, t_end, f_lo, f_hi, c, harmonics=1,
             dto, ratio = _shape(v, d, c)
             rel = tq[None, :] - t0s[:, None]                         # (T0, N)
             rat = np.interp(rel, dto, ratio, left=np.nan, right=np.nan)  # (T0, N)
-            w = sweep_weights(rat, tq, axis=1)                        # (T0, N)
-            w = np.where(np.isnan(rat), 0.0, w)
+            if contrast:
+                w = sweep_weights(rat, tq, axis=1)                    # (T0, N)
+                w = np.where(np.isnan(rat), 0.0, w)
+            else:                                                     # samples past the curve's span count as zero
+                w = np.ones_like(rat)
             wsum = np.maximum(w.sum(axis=1), 1e-12)
             total = np.zeros((len(t0s), len(f0s)))
             for h in range(1, harmonics + 1):
                 F = h * f0s[None, None, :] * rat[:, :, None]           # (T0, N, F0)
                 T = np.broadcast_to(tq[None, :, None], F.shape)
-                vals = curve_contrast(sp, T.ravel(), F.ravel()).reshape(F.shape)
-                total += np.einsum("tn,tnf->tf", w, np.nan_to_num(vals)) / wsum[:, None]
+                vals = curve_contrast(sp, T.ravel(), F.ravel()) if contrast else sp.sample(T.ravel(), F.ravel())
+                total += np.einsum("tn,tnf->tf", w, np.nan_to_num(vals.reshape(F.shape))) / wsum[:, None]
             total /= harmonics
             j = np.argmax(total, axis=1); sc = total[np.arange(len(t0s)), j]
             upd = sc > bs
@@ -138,21 +146,29 @@ def grid_search(sp: Spectrogram, t_start, t_end, f_lo, f_hi, c, harmonics=1,
 def fit_event(sp: Spectrogram, t_start: float, t_end: float, f_lo: float, f_hi: float,
               c: float | None = None, harmonics: int = 1, whiten: bool = True,
               init: tuple[float, float, float, float] | None = None,
-              v_bounds: tuple[float, float] = (10.0, 300.0), d_bounds: tuple[float, float] = (100.0, 30000.0)) -> EventFit:
+              v_bounds: tuple[float, float] = (10.0, 300.0), d_bounds: tuple[float, float] = (100.0, 30000.0),
+              objective: str = "contrast") -> EventFit:
     """Fit (f0, v, d, t_cpa) to the brightest Doppler-shaped curve in a window.
 
-    init=(f0, v, d, t0_emit) narrows the grid search to around that solution."""
+    init=(f0, v, d, t0_emit) narrows the grid search to around that solution.
+
+    objective="contrast" (what detect uses) maximises the sweep-weighted ridge contrast, which
+    ignores broadband bursts and steady tones. objective="brightness" maximises the plain mean
+    brightness under the curve, so the flat asymptotes count as much as the sweep; fits made
+    before f890572 used it, including the committed docs/results event fits, and `fit` uses it
+    by default for a window chosen by hand."""
     c = speed_of_sound() if c is None else c
     pad = 0.3 * (f_hi - f_lo)
     win = sp.crop(t_start - 30, t_end + 30, max(f_lo - pad, sp.f[0]), min(f_hi * harmonics + pad, sp.f[-1]))
     if whiten:
         win = local_whiten(win)
     if init is None:
-        score0, (f0, v, d, t0) = grid_search(win, t_start, t_end, f_lo, f_hi, c, harmonics)
+        score0, (f0, v, d, t0) = grid_search(win, t_start, t_end, f_lo, f_hi, c, harmonics, objective=objective)
     else:   # full v/d grids, but only near the given fundamental and CPA time
         f0, v, d, t0 = init
         score0, (f0, v, d, t0) = grid_search(win, t_start, t_end, f_lo, f_hi, c, harmonics,
-                                             t0_range=(t0 - 30, t0 + 30), f0_range=(max(f0 - 12, 1), f0 + 12))
+                                             t0_range=(t0 - 30, t0 + 30), f0_range=(max(f0 - 12, 1), f0 + 12),
+                                             objective=objective)
     tt = np.linspace(t_start, t_end, 400)
 
     def neg(p):
@@ -161,6 +177,8 @@ def fit_event(sp: Spectrogram, t_start: float, t_end: float, f_lo: float, f_hi: 
             return 1e3
         s = 0.0
         base = ideal_curve(tt, f0_, v_, d_, t0_, c=c)
+        if objective == "brightness":
+            return -sum(float(np.mean(win.sample(tt, h * base))) for h in range(1, harmonics + 1)) / harmonics
         w = sweep_weights(base / f0_, tt)
         for h in range(1, harmonics + 1):
             s += float(np.sum(w * curve_contrast(win, tt, h * base)) / np.sum(w))
