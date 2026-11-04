@@ -51,7 +51,11 @@ See Results below.
    Doppler curve each survivor would hear from the real trajectory
    (emission-time radial velocity) and score it against the spectrogram.
    Event 1's placement absorbs measurement error; event 2's placement is
-   locked to the flight geometry.
+   locked to the flight geometry. `--score ridge` scores how closely the
+   modelled curve follows the ridge traced in the window instead of the
+   brightness under it (see "Ridge score" below); `--v-tol` and `--d-tol`
+   open the speed and distance gates when the fit of a faint or turning
+   pass cannot be trusted.
 5. `refine` — 50 m grid around a winning candidate. Further detected
    flyovers can be added here: each is matched to a flight once, at the
    candidate, then scored at every fine point with the same time shift as
@@ -70,6 +74,10 @@ uv run dopplertrack search rec.npz --events ev1.json ev2.json --traces traces_ny
     --bbox 40.4 41.3 -74.4 -72.6 --spacing 200 --harmonics 2 1 --out results.csv
 uv run dopplertrack refine rec.npz results.csv --events ev1.json ev2.json --traces traces_ny.npz \
     --bbox 40.4 41.3 -74.4 -72.6 --harmonics 2 1 --extra ev3.json ev4.json --out fine.csv
+# one faint flyover whose heard-CPA time is known (here 20:40:58 UTC), gates opened wide
+uv run dopplertrack fit rec.npz --window 1375 1465 --band 70 105 --harmonics 2 --out ev_faint.json
+uv run dopplertrack search-single rec.npz --event ev_faint.json --traces traces_ny.npz --utc 1788900058.6 \
+    --bbox 40.4 41.3 -74.4 -72.6 --harmonics 2 --v-tol 1.0 --d-tol 0.05 20 --out single.csv
 ```
 
 `search --point LAT LON` scores a single known location instead of a grid,
@@ -181,6 +189,62 @@ left the Oyster Bay result unchanged. Scoring the curve against its
 spectral neighbourhood (a contrastive score) was tried as well: it widens
 the Oyster Bay margin but does not help the eagle cam, so it is not in.
 
+### A faint single flyover with a known time
+
+The video's last experiment locates the recording from one faint one-minute
+curve, given its time. The Oyster Bay hour has such a curve at 1375–1465 s:
+a fundamental sweeping 92 to 73 Hz a few dB above the noise, with its second
+harmonic ([`docs/results/oyster_bay_ev_faint.json`](docs/results/oyster_bay_ev_faint.json)).
+The only ADS-B flight passing the true point then is N7681Y, a Piper Twin
+Comanche, whose heard CPA at the true point is 0.9 s from the fitted one.
+Its curve modelled from the real trajectory sits on the faint ridge
+([figure](docs/results/oyster_bay_faint_curve.png)), but the straight-pass
+fit of that ridge says 41 m/s at 750 m where the aircraft was doing 70 m/s
+at 8.2 km: a sharp drop followed by a flat tail reads as a close slow pass,
+and the search's default gates (±35 % in speed, 0.4–2.5× in distance) drop
+the true flight before scoring. With the gates opened (`--v-tol 1.0
+--d-tol 0.05 20`), `search-single` over the same 100 x 150 km box and ±30 s
+scores 77,280 (point, flight) pairs from 66 flights:
+
+| score | top point | margin over the next flight | top-20 points on N7681Y | of those within 2 km |
+|---|---|---|---|---|
+| brightness | 1.7 km from the truth, N7681Y | 31.6 % | 20 | 17 |
+| ridge | 2.3 km from the truth, N7681Y | 14.5 % | 20 | 3 |
+
+Tables: [`oyster_bay_single_faint_brightness.csv`](docs/results/oyster_bay_single_faint_brightness.csv),
+[`oyster_bay_single_faint_ridge.csv`](docs/results/oyster_bay_single_faint_ridge.csv).
+Two lessons. A single faint flyover with a known time does locate the
+recording to a couple of kilometres in a box this size, as the video says.
+And the ideal-curve fit is the weak link: on a pass that is not straight it
+is wrong by a factor of ten in distance, so the gates it seeds must be loose
+or, better, replaced by the trajectory-modelled curve itself.
+
+**Ridge score.** For that faint curve the video scores candidates by their
+distance from a hand-traced line rather than by brightness. `--score ridge`
+is the automatic version: a Viterbi ridge is traced through the event
+window once (harmonics are multiples of it), frames are kept only where the
+ridge is bright and at least 3 dB brighter than the best path that avoids
+it (a bird burst or a second tone offers several equally good paths and says
+nothing), and a modelled curve scores the fraction of kept frames it passes
+within 1.5 % in frequency of ([tracks and masks](docs/results/ridge_tracks.png)).
+On the two blind two-event searches it is not an improvement over
+brightness, and it is not the default:
+
+| recording | brightness: true pair rank, margin | ridge: rank, margin |
+|---|---|---|
+| Oyster Bay (328 pairs) | 1, 4.9 % | 1, 4.0 % |
+| eagle cam (607 pairs) | 1, 2.5 % | 4 (1 without the uniqueness mask, 0.6 %) |
+
+Widening the tolerance to 3 % or 5 % or dropping the mask moves the eagle
+cam between rank 1 with no margin and rank 4; the pair it loses to is the
+one brightness ranks second, two aircraft on the same airway whose curves
+differ little. Best-per-pair tables under both scores:
+[`oyster_bay_search_best_per_pair_ridge.csv`](docs/results/oyster_bay_search_best_per_pair_ridge.csv),
+[`swfl_search_best_per_pair_ridge.csv`](docs/results/swfl_search_best_per_pair_ridge.csv).
+What the ridge score does give is a score in [0, 1] with a meaning (the
+share of the measured curve the candidate explains) and a per-frame
+residual, which is the raw material for an uncertainty estimate.
+
 ## Changes from the method in the video
 
 The physics and the search strategy are the author's. What differs:
@@ -206,7 +270,12 @@ The physics and the search strategy are the author's. What differs:
   f0 sweeps of the locked scorer run as one array operation per candidate.
 - **Single-event, known-time mode as a first-class command.** The video
   demonstrates locating from one faint one-minute curve when the recording
-  time is known; `search-single` exposes that directly.
+  time is known; `search-single` exposes that directly, and reproduces it on
+  the Oyster Bay hour (see above).
+- **Ridge scoring as an option.** The video scores its faint curve by
+  distance from a hand-traced line; `--score ridge` traces the line itself,
+  with a uniqueness mask instead of a person's judgement of where the line
+  is real.
 
 Kept unchanged on purpose: emission-time radial velocity (not
 observation-time), propagation-delayed CPA times, slant distance with a DEM,

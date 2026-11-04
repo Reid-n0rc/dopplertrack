@@ -1,28 +1,90 @@
 """Score candidate observers by modelling the exact Doppler curve they would hear."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from .audio import Spectrogram
 from .doppler import curve_from_trajectory, speed_of_sound
 from .search import Segment
-from .tracks import EventFit, local_whiten
+from .tracks import EventFit, local_whiten, ridge
+
+RIDGE_MIN_DB = 3.0          # ridge frames dimmer than this (whitened dB) carry no evidence
+RIDGE_MIN_UNIQUE_DB = 3.0   # ... and so do frames where another path through the window is nearly as bright
+RIDGE_EXCLUDE_BINS = 3      # half-width of the band blanked around the ridge to find that other path
+RIDGE_SIGMA = 0.015         # frequency tolerance of the ridge score, as a fraction of the ridge frequency
+SCORE_MODES = ("brightness", "ridge")
 
 
 @dataclass
 class EventWindow:
-    """Whitened spectrogram crop for one event plus its measured parameters."""
+    """Whitened spectrogram crop for one event plus its measured parameters.
+
+    mode="brightness" scores a modelled curve by the brightness under it. mode="ridge" first
+    extracts the ridge of the measured curve (a Viterbi path over the fit window; harmonics
+    are multiples of it) and scores a modelled curve by how closely it follows that ridge:
+    each reliable frame contributes exp(-0.5 (df / (RIDGE_SIGMA f))^2), so the score is the
+    fraction of the window where the model runs along the ridge, in [0, 1]. A frame is
+    reliable when the ridge is at least RIDGE_MIN_DB bright and at least RIDGE_MIN_UNIQUE_DB
+    brighter than the best path that avoids it: a bird burst or a second tone offers several
+    equally good paths and says nothing about where the aircraft's tone is. That is what a
+    faint curve needs: brightness cannot separate candidates on a tone a few dB above the
+    noise, but the ridge's position can."""
     fit: EventFit
     sp: Spectrogram
     harmonics: int = 1
+    mode: str = "brightness"
+    ridge_sigma: float = RIDGE_SIGMA
+    ridge_data: tuple | None = field(default=None, repr=False, compare=False)   # (t, f[h], w[h])
 
     @classmethod
-    def from_fit(cls, sp: Spectrogram, fit: EventFit, harmonics: int = 1, pad_s: float = 40.0):
+    def from_fit(cls, sp: Spectrogram, fit: EventFit, harmonics: int = 1, pad_s: float = 40.0,
+                 mode: str = "brightness", ridge_min_db: float = RIDGE_MIN_DB,
+                 ridge_min_unique_db: float = RIDGE_MIN_UNIQUE_DB, ridge_sigma: float = RIDGE_SIGMA):
+        if mode not in SCORE_MODES:
+            raise ValueError(f"unknown score mode {mode!r}; use one of {SCORE_MODES}")
         w = sp.crop(fit.t_start - pad_s, fit.t_end + pad_s, max(fit.f_post * 0.8, sp.f[0]),
                     min(fit.f_pre * 1.25 * harmonics, sp.f[-1]))
-        return cls(fit, local_whiten(w), harmonics)
+        ew = cls(fit, local_whiten(w), harmonics, mode, ridge_sigma)
+        if mode == "ridge":
+            ew.extract_ridge(ridge_min_db, ridge_min_unique_db)
+        return ew
+
+    def extract_ridge(self, min_db: float = RIDGE_MIN_DB, min_unique_db: float = RIDGE_MIN_UNIQUE_DB):
+        """Ridge of the fundamental over the fit window, within the band the fit's asymptotes
+        bound (with margin). Harmonic h is h times that ridge (the harmonics of one pass are
+        one event; tracking them separately lets a harmonic band latch onto the brighter
+        fundamental). A frame is reliable when the ridge is at least min_db bright and at
+        least min_unique_db brighter than the best path through the window that stays
+        RIDGE_EXCLUDE_BINS bins away from it; harmonic h additionally needs h * ridge to be
+        at least min_db bright."""
+        w = self.sp.crop(self.fit.t_start, self.fit.t_end, max(self.fit.f_post * 0.8, self.sp.f[0]),
+                         min(self.fit.f_pre * 1.25, self.sp.f[-1]))
+        fr = ridge(w)
+        j = np.rint((fr - w.f[0]) / w.df).astype(int)
+        S2 = np.where(np.abs(np.arange(len(w.f))[:, None] - j[None, :]) <= RIDGE_EXCLUDE_BINS, 0.0, w.S)
+        fr2 = ridge(Spectrogram(w.t, w.f, S2.astype(np.float32)))
+        unique = (w.sample(w.t, fr) - w.sample(w.t, fr2)) >= min_unique_db
+        fs = np.array([h * fr for h in range(1, self.harmonics + 1)])
+        ws = np.array([(unique & (self.sp.sample(w.t, h * fr) >= min_db)).astype(float)
+                       for h in range(1, self.harmonics + 1)])
+        self.ridge_data = (w.t, fs, ws)
+
+    def _sample(self, h: int, T, F):
+        """Per-sample evidence for harmonic h at (time, frequency) pairs."""
+        if self.mode == "brightness":
+            return self.sp.sample(T, F)
+        ts, fs, ws = self.ridge_data
+        i = np.rint((T - ts[0]) / (ts[1] - ts[0])).astype(int)
+        inside = (i >= 0) & (i < len(ts))
+        ic = np.clip(i, 0, len(ts) - 1)
+        fr = np.interp(T, ts, fs[h - 1], left=np.nan, right=np.nan)
+        wr = np.where(inside, ws[h - 1][ic], 0.0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            z = (F - fr) / (self.ridge_sigma * fr)
+            v = wr * np.exp(-0.5 * z * z)
+        return np.where(np.isfinite(v), v, 0.0)
 
     def curve_score(self, t_audio, ratio, f0_scale=1.0) -> float:
         """Brightness under the curve averaged over the event's fit window (uncovered parts
@@ -33,11 +95,12 @@ class EventWindow:
         """Scores for every (shift, f0_scale) combination in one vectorised pass.
         The curve is resampled onto n points of the fit window for each shift.
 
-        The score is the brightness summed along the curve divided by n, i.e. the mean
-        over the *whole* fit window, with the parts of the window the modelled curve does
-        not cover counting as zero. A flight whose trajectory only explains half the
-        measured sweep (it took off, landed or left the data mid-pass) therefore earns
-        half the score, instead of being judged only where it happens to fit."""
+        The score is the per-sample evidence (brightness, or the ridge kernel in mode="ridge")
+        summed along the curve divided by n, i.e. the mean over the *whole* fit window, with
+        the parts of the window the modelled curve does not cover counting as zero. A flight
+        whose trajectory only explains half the measured sweep (it took off, landed or left
+        the data mid-pass) therefore earns half the score, instead of being judged only where
+        it happens to fit."""
         tq = np.linspace(self.fit.t_start, self.fit.t_end, n)
         rel = tq[None, :] - np.asarray(shifts)[:, None]                       # (S, n) un-shifted audio time
         ok = np.isfinite(ratio)
@@ -47,7 +110,7 @@ class EventWindow:
         for h in range(1, self.harmonics + 1):
             F = h * self.fit.f0 * np.asarray(f0_scales)[None, :, None] * rat[:, None, :]   # (S, K, n)
             T = np.broadcast_to(tq[None, None, :], F.shape)
-            v = self.sp.sample(T.ravel(), np.nan_to_num(F.ravel(), nan=-1.0)).reshape(F.shape)
+            v = self._sample(h, T.ravel(), np.nan_to_num(F.ravel(), nan=-1.0)).reshape(F.shape)
             v = np.where(np.isfinite(F), v, 0.0)
             total += v.sum(axis=2) / n
         total[~valid] = 0.0

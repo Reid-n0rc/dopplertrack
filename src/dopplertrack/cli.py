@@ -58,7 +58,11 @@ def main(argv=None):
     r.add_argument("--spacing", type=float, default=200.0); r.add_argument("--harmonics", nargs=2, type=int, default=(1, 1))
     r.add_argument("--no-dem", action="store_true"); r.add_argument("--no-silence", action="store_true")
     r.add_argument("--tol", type=float, default=6.0)
+    r.add_argument("--v-tol", type=float, default=0.35, help="speed gate, as a fraction of each event's fitted speed")
+    r.add_argument("--d-tol", nargs=2, type=float, default=(0.4, 2.5), metavar=("LO", "HI"), help="distance gate, as multiples of each event's fitted CPA distance")
     r.add_argument("--cpa-cache", metavar="NPZ", help="cache the (point, flight) CPA table here; reused on reruns with the same grid and traces")
+    r.add_argument("--score", choices=("brightness", "ridge"), default="brightness",
+                   help="brightness: brightness under the modelled curve; ridge: how closely it follows the ridge traced in the window (for faint curves)")
 
     rf = sub.add_parser("refine", help="fine grid around one search result, optionally adding more events")
     rf.add_argument("spec"); rf.add_argument("results", help="CSV written by search")
@@ -71,6 +75,7 @@ def main(argv=None):
     rf.add_argument("--extra", nargs="*", default=[], metavar="EV_JSON", help="further events (from detect or fit) to score locked to the same clock")
     rf.add_argument("--extra-harmonics", nargs="*", type=int, default=[])
     rf.add_argument("--no-dem", action="store_true")
+    rf.add_argument("--score", choices=("brightness", "ridge"), default="brightness", help="as for search")
 
     g = sub.add_parser("search-single", help="rank locations for ONE event whose absolute time is known")
     g.add_argument("spec"); g.add_argument("--event", required=True); g.add_argument("--traces", required=True)
@@ -78,6 +83,9 @@ def main(argv=None):
     g.add_argument("--tol", type=float, default=30.0); g.add_argument("--out", required=True)
     g.add_argument("--bbox", nargs=4, type=float, required=True, metavar=("LATMIN", "LATMAX", "LONMIN", "LONMAX"))
     g.add_argument("--spacing", type=float, default=200.0); g.add_argument("--harmonics", type=int, default=1)
+    g.add_argument("--score", choices=("brightness", "ridge"), default="brightness", help="as for search")
+    g.add_argument("--v-tol", type=float, default=0.35, help="speed gate, as a fraction of the fitted speed; a faint or turning pass fits badly, so open it (e.g. 1.0)")
+    g.add_argument("--d-tol", nargs=2, type=float, default=(0.4, 2.5), metavar=("LO", "HI"), help="distance gate, as multiples of the fitted CPA distance (e.g. 0.05 20)")
     g.add_argument("--no-dem", action="store_true")
 
     a = ap.parse_args(argv)
@@ -120,7 +128,8 @@ def main(argv=None):
         else:
             grid = Grid.make(*a.bbox, a.spacing, elev)
         res, segs = pipeline.run_search(sp, ev1, ev2, traces, grid, harmonics=tuple(a.harmonics),
-                                        silence_d_m=None if a.no_silence else 6000.0, tol_s=a.tol, cpa_cache=a.cpa_cache)
+                                        silence_d_m=None if a.no_silence else 6000.0, tol_s=a.tol, cpa_cache=a.cpa_cache,
+                                        v_tol=a.v_tol, d_tol=tuple(a.d_tol), score_mode=a.score)
         res["lat0"] = grid.lat0; res["lon0"] = grid.lon0
         res.to_csv(a.out, index=False)
         print(res.head(20).to_string())
@@ -139,7 +148,7 @@ def main(argv=None):
         row = pipeline.relocate_row(row, segs, ev2.t_cpa - ev1.t_cpa)
         print(f"refining rank {a.rank}: {row.icao1}/{row.icao2} at {row.lat:.5f}, {row.lon:.5f} (score {row.score:.2f})")
         fine = pipeline.refine(sp, ev1, ev2, segs, row, spacing_m=a.spacing, half_m=a.half, harmonics=tuple(a.harmonics),
-                               elevation=elev, extra=extra, extra_harmonics=xh)
+                               elevation=elev, extra=extra, extra_harmonics=xh, score_mode=a.score)
         fine.to_csv(a.out, index=False)
         b = fine.iloc[0]
         print(f"peak score {b.score:.2f} at {b.lat:.6f}, {b.lon:.6f}" + (f"; extra flights {fine.attrs['extra_icao']}" if extra else ""))
@@ -155,7 +164,8 @@ def main(argv=None):
             t_unix = datetime.fromisoformat(a.utc).astimezone(timezone.utc).timestamp()
         elev = None if a.no_dem else Terrain().elevation
         grid = Grid.make(*a.bbox, a.spacing, elev)
-        res, segs = pipeline.run_single_search(sp, ev, traces, grid, t_unix, tol_s=a.tol, harmonics=a.harmonics)
+        res, segs = pipeline.run_single_search(sp, ev, traces, grid, t_unix, tol_s=a.tol, harmonics=a.harmonics,
+                                               v_tol=a.v_tol, d_tol=tuple(a.d_tol), score_mode=a.score)
         res["lat0"] = grid.lat0; res["lon0"] = grid.lon0
         res.to_csv(a.out, index=False)
         print(res.head(20).to_string())

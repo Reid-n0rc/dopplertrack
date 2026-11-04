@@ -85,9 +85,10 @@ def relocate_row(row, segs: list[Segment], dt_s: float):
 def run_search(sp: Spectrogram, ev1: EventFit, ev2: EventFit, traces: list[Trace], grid: Grid,
                harmonics=(1, 1), tol_s=6.0, v_tol=0.35, d_tol=(0.4, 2.5), silence_d_m=6000.0,
                max_range_m=12000.0, c=None, top_pairs=None, progress=True,
-               cpa_cache=None) -> tuple[pd.DataFrame, list[Segment]]:
+               cpa_cache=None, score_mode="brightness") -> tuple[pd.DataFrame, list[Segment]]:
     """Rank grid points for a two-event recording.
 
+    score_mode: "brightness" (default) or "ridge", see score.EventWindow.
     cpa_cache: optional .npz path. The (grid point, flight) CPA table depends only on the grid,
     the traces and max_range, not on the events, and is the slow part; with a path given it is
     loaded if present and valid for this grid/traces, else computed and saved."""
@@ -113,7 +114,8 @@ def run_search(sp: Spectrogram, ev1: EventFit, ev2: EventFit, traces: list[Trace
                             v2=(ev2.v * (1 - v_tol), ev2.v * (1 + v_tol)), d2=(ev2.d * d_tol[0], ev2.d * d_tol[1]),
                             silence_d_m=silence_d_m)
     log(f"{len(pairs)} candidate (point, flight1, flight2) triples after offset + silence filters")
-    w1 = EventWindow.from_fit(sp, ev1, harmonics[0]); w2 = EventWindow.from_fit(sp, ev2, harmonics[1])
+    w1 = EventWindow.from_fit(sp, ev1, harmonics[0], mode=score_mode)
+    w2 = EventWindow.from_fit(sp, ev2, harmonics[1], mode=score_mode)
     out = []
     t0 = time.time()
     for k, p in enumerate(pairs.itertuples()):
@@ -127,13 +129,14 @@ def run_search(sp: Spectrogram, ev1: EventFit, ev2: EventFit, traces: list[Trace
 
 
 def pick_flight(sp: Spectrogram, ev: EventFit, segs: list[Segment], obs_enu, t0_map: float, shift: float,
-                harmonics: int = 1, c=None, max_range_m=12000.0, alive_pad_s=300.0) -> tuple[int, float]:
+                harmonics: int = 1, c=None, max_range_m=12000.0, alive_pad_s=300.0,
+                score_mode="brightness") -> tuple[int, float]:
     """Which flight does an observer at obs_enu hear as `ev`, given the recording's time map
     (audio = unix + t0_map) and the time shift already chosen for event 1? Returns
     (segment index, locked score); (-1, 0) if no flight is near at that time."""
     from .score import EventWindow, modelled_curve
     c = speed_of_sound() if c is None else c
-    w = EventWindow.from_fit(sp, ev, harmonics)
+    w = EventWindow.from_fit(sp, ev, harmonics, mode=score_mode)
     t_unix = ev.t_cpa - t0_map
     best, best_s = -1, 0.0
     for k, seg in enumerate(segs):
@@ -149,7 +152,8 @@ def pick_flight(sp: Spectrogram, ev: EventFit, segs: list[Segment], obs_enu, t0_
 
 
 def refine(sp, ev1, ev2, segs, res_row, spacing_m=50.0, half_m=400.0, harmonics=(1, 1), elevation=None, c=None,
-           extra: list[EventFit] | None = None, extra_harmonics: list[int] | None = None):
+           extra: list[EventFit] | None = None, extra_harmonics: list[int] | None = None,
+           score_mode="brightness"):
     """Fine grid around one result row for one flight pair.
 
     extra: further measured events (beyond the two the search used). For each, the flight is
@@ -167,18 +171,19 @@ def refine(sp, ev1, ev2, segs, res_row, spacing_m=50.0, half_m=400.0, harmonics=
     g = Grid.make(lat - dlat, lat + dlat, lon - dlon, lon + dlon, spacing_m, elevation)
     # re-express grid in the segments' ENU frame (segments were built on the search grid origin)
     seg1, seg2 = segs[int(res_row.seg1)], segs[int(res_row.seg2)]
-    w1 = EventWindow.from_fit(sp, ev1, harmonics[0]); w2 = EventWindow.from_fit(sp, ev2, harmonics[1])
+    w1 = EventWindow.from_fit(sp, ev1, harmonics[0], mode=score_mode)
+    w2 = EventWindow.from_fit(sp, ev2, harmonics[1], mode=score_mode)
     # choose the flight for each extra event at the candidate point itself
     el0 = float(elevation(np.array([lat]), np.array([lon]))[0]) if elevation else 0.0
     obs0 = lla_to_enu(lat, lon, el0, res_row.lat0, res_row.lon0)
     t0_map0 = ev1.t_cpa - float(res_row.t_heard1)
     xsegs, xwins = [], []
     for ev, h in zip(extra, extra_harmonics):
-        k, sc = pick_flight(sp, ev, segs, obs0, t0_map0, float(res_row["shift"]), h, c)
+        k, sc = pick_flight(sp, ev, segs, obs0, t0_map0, float(res_row["shift"]), h, c, score_mode=score_mode)
         if k < 0:
             raise ValueError(f"no flight near the candidate at the time of the extra event at {ev.t_cpa:.0f} s")
         log(f"extra event at {ev.t_cpa:.0f} s: {segs[k].icao} (score {sc:.2f} at the candidate)")
-        xsegs.append(segs[k]); xwins.append(EventWindow.from_fit(sp, ev, h))
+        xsegs.append(segs[k]); xwins.append(EventWindow.from_fit(sp, ev, h, mode=score_mode))
     rows = []
     for i in range(len(g)):
         obs = lla_to_enu(g.lat[i], g.lon[i], g.elev[i], res_row.lat0, res_row.lon0)
@@ -198,7 +203,7 @@ def refine(sp, ev1, ev2, segs, res_row, spacing_m=50.0, half_m=400.0, harmonics=
 
 def run_single_search(sp: Spectrogram, ev: EventFit, traces: list[Trace], grid: Grid, t_cpa_unix: float,
                       tol_s: float = 30.0, harmonics: int = 1, v_tol=0.35, d_tol=(0.4, 2.5),
-                      max_range_m=12000.0, c=None) -> tuple[pd.DataFrame, list[Segment]]:
+                      max_range_m=12000.0, c=None, score_mode="brightness") -> tuple[pd.DataFrame, list[Segment]]:
     """One event whose absolute time is known (±tol_s): rank grid points by how well the
     curve they would hear from each nearby flight matches the spectrogram."""
     from .score import single_score
@@ -213,7 +218,7 @@ def run_single_search(sp: Spectrogram, ev: EventFit, traces: list[Trace], grid: 
     m = cpa[(cpa.t_heard - t_cpa_unix).abs() <= tol_s]
     m = m[m.v.between(ev.v * (1 - v_tol), ev.v * (1 + v_tol)) & m.d.between(ev.d * d_tol[0], ev.d * d_tol[1])]
     log(f"{len(m)} candidate (point, flight) pairs")
-    w = EventWindow.from_fit(sp, ev, harmonics)
+    w = EventWindow.from_fit(sp, ev, harmonics, mode=score_mode)
     out = []
     for p in m.itertuples():
         s = single_score(w, keep[p.seg], grid.enu[p.gidx], float(p.t_heard), c=c)
