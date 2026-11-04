@@ -67,7 +67,9 @@ See Results below.
    only in each pair's small lens, tested with the same exact CPA values,
    gates and silence filter, and scored with the same locked scorer. The
    candidate table is cached per event set, so a scorer change reruns only
-   the scoring.
+   the scoring. `--extra` then rescores the best pairs with further
+   flyovers, each matched to a flight at the pair's best point and scored
+   at all of its points on the same clock, as `refine --extra` does.
 5. `refine` — 50 m grid around a winning candidate. Further detected
    flyovers can be added here: each is matched to a flight once, at the
    candidate, then scored at every fine point with the same time shift as
@@ -90,7 +92,7 @@ uv run dopplertrack refine rec.npz results.csv --events ev1.json ev2.json --trac
 uv run dopplertrack fetch-day 2026-09-08 traces_conus.npz --bbox 24 50 -125 -66
 uv run dopplertrack index-day traces_conus.npz index_2026-09-08.npz
 uv run dopplertrack search-wide rec.npz --events ev1.json ev2.json --index index_2026-09-08.npz \
-    --cands cands.npz --harmonics 2 1 --out wide.csv
+    --cands cands.npz --harmonics 2 1 --out wide.csv --extra ev3.json ev4.json   # extras rescore the top pairs
 # one faint flyover whose heard-CPA time is known (here 20:40:58 UTC), gates opened wide
 uv run dopplertrack fit rec.npz --window 1375 1465 --band 70 105 --harmonics 2 --out ev_faint.json
 uv run dopplertrack search-single rec.npz --event ev_faint.json --traces traces_ny.npz --utc 1788900058.6 \
@@ -287,7 +289,10 @@ best 200 m lattice point **32 m** from the true location, with a 6.2 %
 margin over the runner-up (a pair over Texas). The next pair within 100 km
 of the truth ranks 3rd. The best point of every pair is in
 [`docs/results/oyster_bay_wide_best_per_pair.csv`](docs/results/oyster_bay_wide_best_per_pair.csv)
-(top 1,000 of 9,669).
+(top 1,000 of 9,669). Adding the faint flyover from the single-event
+experiment below as an extra (`--extra ev_faint.json --extra-harmonics 2`)
+widens the margin to 24 %, and the flight it matches to that event at the
+true point is N7681Y, the Twin Comanche found there by hand.
 
 **The eagle cam, nationally.** The same search over 2024-12-28 (13,046 prop
 flights; 102,941 pairs joined in 6 s, 1,060,324 points on 13,466 pairs in
@@ -298,10 +303,18 @@ near Tampa, with a 1.7 % margin
 ([`docs/results/swfl_wide_best_per_pair.csv`](docs/results/swfl_wide_best_per_pair.csv)).
 That is the regional finding writ large: two high, nearly overhead passes
 pin a location to about 2 km and a 2.5 % margin in a box, and a continent
-offers many pairs that fit two such curves as well. The extra flyovers
-that `refine --extra` uses to pin the eagle cam regionally are what a
-national search of that recording needs too, applied to the top pairs
-rather than to one.
+offers many pairs that fit two such curves as well.
+
+The extra flyovers that pin the eagle cam regionally do the same
+nationally. `--extra` takes the three further detected flyovers that
+`refine --extra` used, matches each to a flight at every top pair's best
+point, and scores it at all of that pair's points on the same clock. On
+the 200 best two-event pairs this takes one second, and the true pair
+moves from 15th to **first, 627 m from the nest, with a 13 % margin**
+([`docs/results/swfl_wide_extra_best_per_pair.csv`](docs/results/swfl_wide_extra_best_per_pair.csv)).
+The rescoring only sees the pairs the two-event search ranked in the top
+`--top-pairs` (200 by default), so the two events still have to put the
+truth somewhere in that list; here they put it 15th.
 
 Two things made this feasible at all. The join over trajectories replaces
 the grid: a box the size of the country at 200 m would be 200 million

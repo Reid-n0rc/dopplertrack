@@ -111,6 +111,10 @@ def main(argv=None):
     sw.add_argument("--no-silence", action="store_true"); sw.add_argument("--workers", type=int, help="process pool size (default: all cores on Linux, 1 on macOS)")
     sw.add_argument("--score", choices=("brightness", "ridge"), default="brightness", help="as for search")
     sw.add_argument("--top", type=int, default=20)
+    sw.add_argument("--extra", nargs="*", default=[], metavar="EV_JSON", help="further events (from detect or fit): the top pairs are rescored with them locked to the same clock")
+    sw.add_argument("--extra-harmonics", nargs="*", type=int, default=[])
+    sw.add_argument("--top-pairs", type=int, default=200, help="how many of the best two-event pairs to rescore with --extra")
+    sw.add_argument("--out-extra", metavar="CSV", help="where the rescored top pairs go (default: OUT with _extra before .csv)")
 
     a = ap.parse_args(argv)
     if a.cmd == "spectrogram":
@@ -200,6 +204,15 @@ def main(argv=None):
                               silence_d_m=None if a.no_silence else 6000.0, max_range_m=a.max_range, spacing_m=a.spacing, coarse_m=a.coarse,
                               elevation=elev, score_mode=a.score, workers=a.workers, cand_cache=a.cands)
         res.to_csv(a.out, index=False)
+        if a.extra:
+            from .wide import rescore_with_extra
+            extra = [load_event(p) for p in a.extra]
+            xh = list(a.extra_harmonics) + [1] * (len(extra) - len(a.extra_harmonics))
+            res = rescore_with_extra(sp, ev1, extra, idx, res, extra_harmonics=xh, top_pairs=a.top_pairs, score_mode=a.score,
+                                     max_range_m=a.max_range, workers=a.workers)
+            out = a.out_extra or (a.out[:-4] + "_extra.csv" if a.out.endswith(".csv") else a.out + "_extra.csv")
+            res.to_csv(out, index=False)
+            print(f"wrote {out}")
         print(res.head(a.top).to_string())
     elif a.cmd == "search-single":
         from datetime import datetime, timezone

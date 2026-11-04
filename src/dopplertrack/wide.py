@@ -441,3 +441,94 @@ def run_wide_search(sp, ev1, ev2, idx: DayIndex, harmonics=(1, 1), tol_s=6.0, v_
                            progress=lambda k, n, s: log(f"  scored {k}/{n} ({s / k * 1000:.1f} ms each)") if k % 5000 < 200 or k == n else None)
     log(f"scored {len(res)} triples in {time.time() - t0:.0f} s")
     return res
+
+
+# ----------------------------------------------------------------------------------------
+# 5. more events: rescore the top pairs with further flyovers locked to the same clock
+# ----------------------------------------------------------------------------------------
+
+F0_SCALES = np.arange(0.95, 1.0501, 0.005)
+
+
+def pick_flight_wide(idx: DayIndex, w, obs_enu, t0_map: float, shift: float, c: float,
+                     max_range_m: float = 12000.0, exclude=()) -> tuple[int, float]:
+    """Which flight does an observer at obs_enu hear as the event in window w, given the
+    recording's clock (audio = unix + t0_map) and the time shift chosen for event 1? The
+    flights within max_range at that time come from the index's bucket trees; the best
+    locked score wins. Returns (segment index, score), (-1, 0) if nothing is near."""
+    from .score import modelled_curve
+    t_unix = w.fit.t_cpa - t0_map
+    W = idx.bucket_s
+    b = int(np.floor(t_unix / W))
+    near: set[int] = set()
+    for bb in (b - 1, b, b + 1):
+        tr = idx.tree(bb)
+        if tr is None:
+            continue
+        sl = idx.bucket_slice(bb)
+        hit = tr.query_ball_point(np.asarray(obs_enu, float), max_range_m + 150.0 * W)
+        near.update(int(x) for x in idx.ss[np.asarray(hit, int) + sl.start])
+    best, best_s = -1, 0.0
+    for si in near - set(exclude):
+        seg = idx.segs[si]
+        to, r = modelled_curve(seg, obs_enu, c)
+        sc = float(w.sweep_scores(to + t0_map, r, [shift], F0_SCALES).max())
+        if sc > best_s:
+            best, best_s = si, sc
+    return best, best_s
+
+
+def _rescore_pair(args):
+    from .score import modelled_curve
+    idx: DayIndex = _G["idx"]; t1 = _G["ev1_t_cpa"]; xw = _G["xw"]; c = _G["c"]; mr = _G["max_range_m"]
+    i0, obs, th1, shift, seg1, seg2 = args
+    k = int(np.argmax(_G["score"][i0:i0 + len(obs)]))                      # the pair's best point chooses the flights
+    t0_map = t1 - float(th1[k])
+    chosen = [pick_flight_wide(idx, w, obs[k], t0_map, float(shift[k]), c, mr, exclude=(seg1, seg2))[0] for w in xw]
+    out = np.zeros((len(obs), len(xw)))
+    for j, (w, si) in enumerate(zip(xw, chosen)):
+        if si < 0:
+            continue
+        seg = idx.segs[si]
+        for n in range(len(obs)):
+            to, r = modelled_curve(seg, obs[n], c)
+            out[n, j] = w.sweep_scores(to + (t1 - float(th1[n])), r, [float(shift[n])], F0_SCALES).max()
+    return i0, out, chosen
+
+
+def rescore_with_extra(sp, ev1, extra, idx: DayIndex, res: pd.DataFrame, extra_harmonics=None, top_pairs: int = 200,
+                       score_mode="brightness", c: float | None = None, max_range_m: float = 12000.0,
+                       workers: int | None = None, log=_log) -> pd.DataFrame:
+    """Add further measured events to the top pairs of a search-wide result. For each of the
+    best `top_pairs` flight pairs, each extra event is matched to a flight once, at the pair's
+    best point (pick_flight_wide), then scored at every point of that pair with that point's
+    own time shift, so every event is locked to one clock, exactly as `refine --extra` does
+    regionally. Returns those pairs' rows re-ranked by score = s1 + s2 + s3 + ..., with the
+    two-event score kept as score12 and the chosen flights as x_icao1, x_icao2, ..."""
+    from .score import EventWindow
+    c = speed_of_sound() if c is None else c
+    workers = default_workers() if workers is None else workers
+    extra = list(extra); extra_harmonics = list(extra_harmonics or [1] * len(extra))
+    xw = [EventWindow.from_fit(sp, ev, h, mode=score_mode) for ev, h in zip(extra, extra_harmonics)]
+    best = res.sort_values("score", ascending=False).drop_duplicates(["seg1", "seg2"]).head(top_pairs)
+    keys = set(zip(best.seg1.tolist(), best.seg2.tolist()))
+    sel = res[[k in keys for k in zip(res.seg1.tolist(), res.seg2.tolist())]].sort_values(["seg1", "seg2"]).reset_index(drop=True)
+    obs = np.stack([lla_to_enu(sel.lat.to_numpy(), sel.lon.to_numpy(), sel.elev.to_numpy(), idx.lat0, idx.lon0)], 0)[0]
+    _G.update(idx=idx, ev1_t_cpa=float(ev1.t_cpa), xw=xw, c=c, max_range_m=max_range_m, score=sel.score.to_numpy())
+    jobs = []
+    bounds = np.flatnonzero(np.r_[True, (sel.seg1.to_numpy()[1:] != sel.seg1.to_numpy()[:-1]) | (sel.seg2.to_numpy()[1:] != sel.seg2.to_numpy()[:-1]), True])
+    for a, b in zip(bounds[:-1], bounds[1:]):
+        jobs.append((int(a), obs[a:b], sel.t_heard1.to_numpy()[a:b], sel["shift"].to_numpy()[a:b], int(sel.seg1.iloc[a]), int(sel.seg2.iloc[a])))
+    xs = np.zeros((len(sel), len(xw))); chosen = np.full((len(sel), len(xw)), -1, int)
+    t0 = time.time()
+    for n, (i0, out, ch) in enumerate(_pool_map(_rescore_pair, jobs, workers, chunksize=1)):
+        xs[i0:i0 + len(out)] = out; chosen[i0:i0 + len(out)] = ch
+        if (n + 1) % 50 == 0:
+            log(f"  rescored {n + 1}/{len(jobs)} pairs ({time.time() - t0:.0f} s)")
+    sel["score12"] = sel.score
+    for j in range(len(xw)):
+        sel[f"s{j + 3}"] = xs[:, j]
+        sel[f"x_icao{j + 1}"] = np.where(chosen[:, j] >= 0, idx.icao[np.maximum(chosen[:, j], 0)], "")
+    sel["score"] = sel.score12 + xs.sum(1)
+    log(f"rescored {len(sel)} points on {len(jobs)} pairs with {len(xw)} extra events in {time.time() - t0:.0f} s")
+    return sel.sort_values("score", ascending=False).reset_index(drop=True)

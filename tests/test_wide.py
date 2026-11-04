@@ -126,3 +126,30 @@ def test_wide_search_ranks_the_observer_first_on_synthetic_audio(tmp_path):
     assert haversine_m(best.lat, best.lon, LAT0, LON0) < 400.0
     again = wide.run_wide_search(sp, ev1, ev2, idx, c=C, workers=1, cand_cache=str(cache), log=lambda m: None)
     assert len(again) == len(res)
+
+
+def test_extra_flyover_rescoring_keeps_the_observer_first_and_picks_the_right_flight():
+    third = _straight("eee001", 1500, (0, -1800, 900), (-100, 0, 0))     # low lateral pass after both events
+    idx = _index([third])
+    sr, dur = 4000, 1800
+    tt = np.arange(0, dur, 1 / sr)
+    x = 0.4 * np.random.default_rng(1).standard_normal(len(tt)).astype(np.float32)
+    for icao, f0 in (("aaa001", 120.0), ("aaa002", 130.0), ("eee001", 150.0)):
+        seg = idx.segs[_seg(idx, icao)]
+        to, ratio, _ = doppler.curve_from_trajectory(seg.t, seg.enu, np.zeros(3), f0=1.0, c=C)
+        finst = np.interp(tt + T0, to, ratio, left=np.nan, right=np.nan) * f0
+        m = np.isfinite(finst)
+        ph = 2 * np.pi * np.cumsum(np.nan_to_num(finst, nan=0.0)) / sr
+        x[m] += 0.05 * np.sin(ph[m])
+    sp = audio.compute_spectrogram(x, sr, nperseg=8192, hop_s=0.5, fmin=60, fmax=300, whiten_window_s=None)
+    ev1 = tracks.fit_event(sp, 230, 400, 90, 170, c=C, objective="brightness")
+    ev2 = tracks.fit_event(sp, 1150, 1310, 100, 180, c=C, objective="brightness")
+    ev3 = tracks.fit_event(sp, 1430, 1570, 110, 200, c=C, objective="brightness")
+    res = wide.run_wide_search(sp, ev1, ev2, idx, c=C, workers=1, log=lambda m: None)
+    out = wide.rescore_with_extra(sp, ev1, [ev3], idx, res, top_pairs=5, c=C, workers=1, log=lambda m: None)
+    assert set(out.columns) >= {"score12", "s3", "x_icao1"}
+    best = out.iloc[0]
+    assert best.icao1 == "aaa001" and best.icao2 == "aaa002" and best.x_icao1 == "eee001"
+    assert haversine_m(best.lat, best.lon, LAT0, LON0) < 400.0
+    assert best.s3 > 0.5 * best.s1
+    assert np.isclose(best.score, best.score12 + best.s3)
