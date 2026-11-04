@@ -41,6 +41,7 @@ def test_iter_tar_traces_skips_corrupt_members():
         "row-too-short": b'{"trace": [[0, 40.1, -74.1]]}',
         "timestamp-not-a-number": b'{"timestamp": {}, "trace": []}',
         "top-level-not-an-object": b"[1, 2, 3]",
+        "row-is-a-dict": b'{"trace": [{"lat": 40.1}]}',
     }
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tf:

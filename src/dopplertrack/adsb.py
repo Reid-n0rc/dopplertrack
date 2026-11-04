@@ -18,7 +18,7 @@ from .geo import lla_to_enu
 
 FT = 0.3048
 KT = 0.514444
-TRACE_PARSE_ERRORS = (OSError, ValueError, IndexError, TypeError, zlib.error, EOFError)
+TRACE_PARSE_ERRORS = (OSError, ValueError, IndexError, KeyError, TypeError, zlib.error, EOFError)   # KeyError: a trace row that is a dict
 _DOC8643_URL = "https://opensky-network.org/datasets/metadata/doc8643AircraftTypes.csv"
 
 
