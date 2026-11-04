@@ -15,6 +15,11 @@ from .terrain import Terrain
 from .tracks import EventFit
 
 
+def load_event(path) -> EventFit:
+    with open(path) as fh:
+        return EventFit(**json.load(fh))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="dopplertrack")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -86,7 +91,8 @@ def main(argv=None):
         js = json.dumps(ef.to_dict(), indent=1)
         print(js)
         if a.out:
-            open(a.out, "w").write(js)
+            with open(a.out, "w") as fh:
+                fh.write(js)
     elif a.cmd == "detect":
         from .tracks import detect_events
         sp = Spectrogram.load(a.spec)
@@ -97,14 +103,15 @@ def main(argv=None):
         for i, e in enumerate(evs):
             print(f"{i + 1:>4} {e.t_cpa:>9.1f} {e.f0:>7.1f} {e.v:>6.0f} {e.d:>7.0f} {e.score:>6.2f}")
         if a.out:
-            json.dump([e.to_dict() for e in evs], open(a.out, "w"), indent=1)
+            with open(a.out, "w") as fh:
+                json.dump([e.to_dict() for e in evs], fh, indent=1)
     elif a.cmd == "extract-region":
         pipeline.extract_region(a.archive_dir, tuple(a.bbox), a.out, prop_only=not a.keep_jets)
     elif a.cmd == "fetch-day":
         pipeline.fetch_region(a.date, tuple(a.bbox), a.out, prop_only=not a.keep_jets, pod=a.pod)
     elif a.cmd == "search":
         sp = Spectrogram.load(a.spec)
-        ev1, ev2 = (EventFit(**json.load(open(p))) for p in a.events)
+        ev1, ev2 = (load_event(p) for p in a.events)
         traces = load_traces(a.traces)
         elev = None if a.no_dem else Terrain().elevation
         if a.point:
@@ -120,8 +127,8 @@ def main(argv=None):
     elif a.cmd == "refine":
         import pandas as pd
         sp = Spectrogram.load(a.spec)
-        ev1, ev2 = (EventFit(**json.load(open(p))) for p in a.events)
-        extra = [EventFit(**json.load(open(p))) for p in a.extra]
+        ev1, ev2 = (load_event(p) for p in a.events)
+        extra = [load_event(p) for p in a.extra]
         xh = list(a.extra_harmonics) + [1] * (len(extra) - len(a.extra_harmonics))
         res = pd.read_csv(a.results)
         best = res.sort_values("score", ascending=False).drop_duplicates(["icao1", "icao2"]).reset_index(drop=True)
@@ -140,12 +147,12 @@ def main(argv=None):
     elif a.cmd == "search-single":
         from datetime import datetime, timezone
         sp = Spectrogram.load(a.spec)
-        ev = EventFit(**json.load(open(a.event)))
+        ev = load_event(a.event)
         traces = load_traces(a.traces)
         try:
             t_unix = float(a.utc)
         except ValueError:
-            t_unix = datetime.fromisoformat(a.utc.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+            t_unix = datetime.fromisoformat(a.utc).astimezone(timezone.utc).timestamp()
         elev = None if a.no_dem else Terrain().elevation
         grid = Grid.make(*a.bbox, a.spacing, elev)
         res, segs = pipeline.run_single_search(sp, ev, traces, grid, t_unix, tol_s=a.tol, harmonics=a.harmonics)
