@@ -54,10 +54,20 @@ def test_readme_fit_windows(recording):
     assert res.s2[0] > 10.0
 
 
-@pytest.mark.xfail(strict=True, reason="detect's fit of event 2 has f0 11 % high and its heard CPA "
-                   "10 s early, outside the search's ±6 s / ±5 % filters (issue #1, PLAN.md Phase 2)")
-def test_detect_output(recording):
+@pytest.fixture(scope="module")
+def detected(recording):
+    sp, _ = recording
+    return sorted(detect_events(sp, 60, 300, top=10)[:2], key=lambda e: e.t_cpa)
+
+
+def test_detect_finds_both_flyovers(detected):
+    # the README: detect's top two are the two hand-picked flyovers, CPA 2155.6 s and 3068.4 s
+    assert abs(detected[0].t_cpa - 2155.6) < 5 and abs(detected[1].t_cpa - 3068.4) < 5
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="detect's fit of event 2 has f0 11 % high and the gap "
+                   "between the events 10 s short, outside the search's ±6 s / ±5 % filters (issue #1)")
+def test_detect_output_passes_the_filters_at_truth(recording, detected):
     sp, traces = recording
-    ev1, ev2 = sorted(detect_events(sp, 60, 300, top=10)[:2], key=lambda e: e.t_cpa)
-    res = _at_truth(sp, traces, ev1, ev2)
+    res = _at_truth(sp, traces, *detected)
     assert len(res) == 1 and (res.icao1[0], res.icao2[0]) == PAIR
