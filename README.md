@@ -23,6 +23,9 @@ over a 100 x 150 km region ranks the true location first, 43 m off after
 refinement. On a 12-hour public eagle-cam stream (North Fort Myers, FL,
 2024-12-28), with the flyovers found automatically, the search ranks the
 right pair of flights first of 607 and places the camera within 600 m.
+Searched nationally, with no box at all, the Oyster Bay recording ranks the
+true pair of flights first of 9,669 over the whole continental US, 32 m from
+the true location, in about half an hour on a 16-thread desktop.
 See Results below.
 
 ## Pipeline
@@ -56,6 +59,15 @@ See Results below.
    brightness under it (see "Ridge score" below); `--v-tol` and `--d-tol`
    open the speed and distance gates when the fit of a faint or turning
    pass cannot be trusted.
+   `search` grids a box, which cannot scale past a region. `index-day` +
+   `search-wide` run the same test over a whole day of a continent without
+   a grid: the flights are paired first (two events heard Δt apart at slant
+   distances d1 and d2 mean the aircraft were within d1 + d2 of each other
+   Δt apart, a cheap join over every trajectory), then ground points are laid
+   only in each pair's small lens, tested with the same exact CPA values,
+   gates and silence filter, and scored with the same locked scorer. The
+   candidate table is cached per event set, so a scorer change reruns only
+   the scoring.
 5. `refine` — 50 m grid around a winning candidate. Further detected
    flyovers can be added here: each is matched to a flight once, at the
    candidate, then scored at every fine point with the same time shift as
@@ -74,6 +86,11 @@ uv run dopplertrack search rec.npz --events ev1.json ev2.json --traces traces_ny
     --bbox 40.4 41.3 -74.4 -72.6 --spacing 200 --harmonics 2 1 --out results.csv
 uv run dopplertrack refine rec.npz results.csv --events ev1.json ev2.json --traces traces_ny.npz \
     --bbox 40.4 41.3 -74.4 -72.6 --harmonics 2 1 --extra ev3.json ev4.json --out fine.csv
+# the same search over the whole continental US, no box: one index per day, reused by every search
+uv run dopplertrack fetch-day 2026-09-08 traces_conus.npz --bbox 24 50 -125 -66
+uv run dopplertrack index-day traces_conus.npz index_2026-09-08.npz
+uv run dopplertrack search-wide rec.npz --events ev1.json ev2.json --index index_2026-09-08.npz \
+    --cands cands.npz --harmonics 2 1 --out wide.csv
 # one faint flyover whose heard-CPA time is known (here 20:40:58 UTC), gates opened wide
 uv run dopplertrack fit rec.npz --window 1375 1465 --band 70 105 --harmonics 2 --out ev_faint.json
 uv run dopplertrack search-single rec.npz --event ev_faint.json --traces traces_ny.npz --utc 1788900058.6 \
@@ -245,6 +262,62 @@ What the ridge score does give is a score in [0, 1] with a meaning (the
 share of the measured curve the candidate explains) and a per-frame
 residual, which is the raw material for an uncertainty estimate.
 
+### Nationwide search
+
+The regional searches above only work because a box was drawn around the
+answer. `search-wide` drops the box: one day of prop flights over the whole
+continental US (35,427 flights, 149 million one-second positions after
+resampling) is indexed once, in one Earth-centred frame so slant distances
+are exact anywhere, and the Oyster Bay events are searched against all of
+it with the default gates.
+
+| stage | Oyster Bay day, 16 threads (Ryzen 5800X) |
+|---|---|
+| `fetch-day`, prop flights over CONUS | 2.5 min at 20 MB/s |
+| `index-day` (1 Hz segments + 10 s samples, 6.2 GB) | 30 s, once per day of data |
+| pair join (speed gates, distance + lag geometry) | 10 s → 66,637 flight pairs |
+| lens lattices, exact CPA, gates, silence filter | 71 s → 2,479,072 points on 9,963 pairs |
+| locked scoring | 16 min |
+
+A scorer change reruns only the last row (`--cands` caches the candidate
+table); a gate change reruns the last three.
+
+Result: the true pair N22NY / N93CQ ranks **1 of 9,669** flight pairs, its
+best 200 m lattice point **32 m** from the true location, with a 6.2 %
+margin over the runner-up (a pair over Texas). The next pair within 100 km
+of the truth ranks 3rd. The best point of every pair is in
+[`docs/results/oyster_bay_wide_best_per_pair.csv`](docs/results/oyster_bay_wide_best_per_pair.csv)
+(top 1,000 of 9,669).
+
+**The eagle cam, nationally.** The same search over 2024-12-28 (13,046 prop
+flights; 102,941 pairs joined in 6 s, 1,060,324 points on 13,466 pairs in
+29 s, scored in 4.5 min) does *not* locate the camera from its two detected
+events alone: the true pair ranks 15 of 13,298, 972 m off, and the winner
+pairs the right first flight with a different second flight 200 km away
+near Tampa, with a 1.7 % margin
+([`docs/results/swfl_wide_best_per_pair.csv`](docs/results/swfl_wide_best_per_pair.csv)).
+That is the regional finding writ large: two high, nearly overhead passes
+pin a location to about 2 km and a 2.5 % margin in a box, and a continent
+offers many pairs that fit two such curves as well. The extra flyovers
+that `refine --extra` uses to pin the eagle cam regionally are what a
+national search of that recording needs too, applied to the top pairs
+rather than to one.
+
+Two things made this feasible at all. The join over trajectories replaces
+the grid: a box the size of the country at 200 m would be 200 million
+points times every flight, while the join touches only pairs whose
+geometry allows the two events, and lays points in the lens where both
+annuli overlap (about 250 points per surviving pair). And the scorer had to
+be rebuilt for a process pool: its original form streamed several megabytes
+of temporaries per candidate, which an Apple-silicon laptop hides and a
+desktop's memory bus does not (16 workers ran 1.4 times faster than one).
+Sampling the spectrogram window along time once per event, so each sweep
+sample is two gathers from a 200 KB array, and walking the sweep in small
+chunks made it twice as fast on one core and eleven times faster on 16.
+The lens stage had the same disease (a dense point-by-track distance
+matrix per pair) and the same cure: a KD-tree nearest-sample query gives
+the identical CPA with no large temporaries, 12 minutes became 71 seconds.
+
 ## Changes from the method in the video
 
 The physics and the search strategy are the author's. What differs:
@@ -267,7 +340,16 @@ The physics and the search strategy are the author's. What differs:
 - **Search engineering.** A KD-tree corridor around each flight path limits
   CPA computation to grid points that could possibly hear it; distance math
   is chunked so multi-hour tracks do not exhaust memory; the time-shift and
-  f0 sweeps of the locked scorer run as one array operation per candidate.
+  f0 sweeps of the locked scorer run as one array operation per candidate,
+  on a window sampled along time once per event.
+- **Continent-scale search by pairing flights, not by laying points along
+  one flight.** The video lays points along every flight segment that
+  matches event 1's speed, at the fitted slant distance, and tests those
+  points for event 2 (73,000 points nationally, with hand-fitted curves and
+  tight ranges). `search-wide` joins flight pairs on the geometry of both
+  events first and lays points only in each pair's lens, which stays cheap
+  under the wider gates an automatic fit needs; with tight gates it reduces
+  to the video's method.
 - **Single-event, known-time mode as a first-class command.** The video
   demonstrates locating from one faint one-minute curve when the recording
   time is known; `search-single` exposes that directly, and reproduces it on

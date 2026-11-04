@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+
+# One BLAS thread per process: the heavy stages run a process per core, and the matrices
+# are small, so BLAS threads on top of that only contend. Set before numpy loads.
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_v, "1")
 
 import numpy as np
 
@@ -88,6 +94,24 @@ def main(argv=None):
     g.add_argument("--d-tol", nargs=2, type=float, default=(0.4, 2.5), metavar=("LO", "HI"), help="distance gate, as multiples of the fitted CPA distance (e.g. 0.05 20)")
     g.add_argument("--no-dem", action="store_true")
 
+    ix = sub.add_parser("index-day", help="build the per-day index a nationwide search runs on (1 Hz segments in one frame + 10 s samples)")
+    ix.add_argument("traces", help="traces .npz from extract-region / fetch-day"); ix.add_argument("out", help="index .npz")
+    ix.add_argument("--origin", nargs=2, type=float, metavar=("LAT0", "LON0"), help="frame origin (default: the traces' median position)")
+    ix.add_argument("--bucket", type=float, default=10.0, help="sample bucket width, s")
+
+    sw = sub.add_parser("search-wide", help="rank candidate locations over a whole day index (continent-scale): pair join, lens lattices, locked scoring")
+    sw.add_argument("spec"); sw.add_argument("--events", nargs=2, required=True, metavar=("EV1_JSON", "EV2_JSON"))
+    sw.add_argument("--index", required=True, help="index .npz from index-day"); sw.add_argument("--out", required=True)
+    sw.add_argument("--cands", metavar="NPZ", help="cache the candidate table here; reused when the index, gates and geometry match")
+    sw.add_argument("--spacing", type=float, default=200.0); sw.add_argument("--coarse", type=float, default=1000.0, help="coarse sweep spacing, m")
+    sw.add_argument("--harmonics", nargs=2, type=int, default=(1, 1))
+    sw.add_argument("--tol", type=float, default=6.0); sw.add_argument("--max-range", type=float, default=12000.0)
+    sw.add_argument("--v-tol", type=float, default=0.35, help="as for search"); sw.add_argument("--d-tol", nargs=2, type=float, default=(0.4, 2.5), metavar=("LO", "HI"))
+    sw.add_argument("--no-dem", action="store_true"); sw.add_argument("--dem-zoom", type=int, default=9, help="terrain tile zoom for candidate points (9: ~300 m pixels, a few hundred tiles for the whole country)")
+    sw.add_argument("--no-silence", action="store_true"); sw.add_argument("--workers", type=int, help="process pool size (default: all cores on Linux, 1 on macOS)")
+    sw.add_argument("--score", choices=("brightness", "ridge"), default="brightness", help="as for search")
+    sw.add_argument("--top", type=int, default=20)
+
     a = ap.parse_args(argv)
     if a.cmd == "spectrogram":
         sp = pipeline.make_spectrogram(a.audio, a.out, hop_s=a.hop, fmin=a.fmin, fmax=a.fmax)
@@ -153,6 +177,30 @@ def main(argv=None):
         b = fine.iloc[0]
         print(f"peak score {b.score:.2f} at {b.lat:.6f}, {b.lon:.6f}" + (f"; extra flights {fine.attrs['extra_icao']}" if extra else ""))
         print(fine.head(10).to_string())
+    elif a.cmd == "index-day":
+        import time
+        from .wide import DayIndex
+        t0 = time.time()
+        traces = load_traces(a.traces)
+        print(f"{len(traces)} traces loaded in {time.time() - t0:.0f} s", flush=True)
+        o = a.origin or (None, None)
+        idx = DayIndex.build(traces, o[0], o[1], bucket_s=a.bucket)
+        idx.save(a.out)
+        print(f"wrote {a.out}: {len(idx)} segments, {len(idx.t)} 1 Hz points, {len(idx.sb)} samples, origin {idx.lat0:.4f}, {idx.lon0:.4f}, {time.time() - t0:.0f} s")
+    elif a.cmd == "search-wide":
+        import time
+        from .wide import DayIndex, run_wide_search
+        t0 = time.time()
+        sp = Spectrogram.load(a.spec)
+        ev1, ev2 = (load_event(p) for p in a.events)
+        idx = DayIndex.load(a.index)
+        print(f"[{time.strftime('%H:%M:%S')}] index: {len(idx)} segments, {len(idx.t)} points, loaded in {time.time() - t0:.0f} s", flush=True)
+        elev = None if a.no_dem else Terrain(zoom=a.dem_zoom).elevation
+        res = run_wide_search(sp, ev1, ev2, idx, harmonics=tuple(a.harmonics), tol_s=a.tol, v_tol=a.v_tol, d_tol=tuple(a.d_tol),
+                              silence_d_m=None if a.no_silence else 6000.0, max_range_m=a.max_range, spacing_m=a.spacing, coarse_m=a.coarse,
+                              elevation=elev, score_mode=a.score, workers=a.workers, cand_cache=a.cands)
+        res.to_csv(a.out, index=False)
+        print(res.head(a.top).to_string())
     elif a.cmd == "search-single":
         from datetime import datetime, timezone
         sp = Spectrogram.load(a.spec)
